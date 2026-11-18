@@ -1,13 +1,51 @@
 const $=id=>document.getElementById(id);let last=null;
-const fmt=n=>Number.isFinite(n)?Number(n).toPrecision(10):String(n);
+const fmt=n=>Number.isFinite(n)?Number(n).toFixed(3):String(n);
 const textResult=d=>["NEWTON-RAPHSON SOLUTION",`Equation: ${d.equation}`,`Approximate root: ${fmt(d.root)}`,`Residual: ${fmt(d.residual)}`,`Status: ${d.message}`,`Iterations: ${d.steps.length}`,"","Formula: x_next = x - f(x) / f'(x)","Derivative estimated using central differences.","",...d.steps.map(s=>`Iteration ${s.iteration}: x=${fmt(s.x)}, f(x)=${fmt(s.fx)}, f'(x)=${fmt(s.derivative)}\nx_next=${fmt(s.x)} - (${fmt(s.fx)}) / (${fmt(s.derivative)}) = ${fmt(s.nextX)}\nAbsolute change=${fmt(s.error)}, residual=${fmt(s.residual)}\n`)].join('\n');
-$('solverForm').addEventListener('submit',async e=>{e.preventDefault();$('message').textContent='';$('solveBtn').disabled=true;try{const response=await fetch('/api/solve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({equation:$('equation').value,initialGuess:Number($('guess').value),tolerance:Number($('tolerance').value),maxIterations:Number($('iterations').value)})});if(!response.ok){const err=await response.json();throw Error(err.detail||err.message||'Unable to calculate. Check your inputs.')}last=await response.json();render(last)}catch(err){$('message').textContent=err.message;$('results').classList.add('hidden')}finally{$('solveBtn').disabled=false}});
-$('resetBtn').onclick=()=>{ $('solverForm').reset();$('results').classList.add('hidden');$('message').textContent='';last=null};
+document.querySelectorAll('[data-insert], [data-backspace]').forEach(button=>button.addEventListener('click',()=>{const field=$('equation'),start=field.selectionStart??field.value.length,end=field.selectionEnd??start;let insertion=button.dataset.insert||'';if(button.dataset.backspace){if(start===end&&start>0){field.setRangeText('',start-1,end,'end')}else field.setRangeText('',start,end,'end')}else{field.setRangeText(insertion,start,end,'end')}field.focus()}));
+$('solverForm').addEventListener('submit',async e=>{e.preventDefault();$('message').textContent='';$('solveBtn').disabled=true;try{const response=await fetch('/api/solve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({equation:$('equation').value,initialGuess:Number($('guess').value),tolerance:Number($('tolerance').value),maxIterations:Number($('iterations').value)})});if(!response.ok){const err=await response.json();throw Error(err.detail||err.message||'Unable to calculate. Check your inputs.')}last=await response.json();render(last)}catch(err){$('message').textContent=err.message;$('results').classList.add('hidden');$('placeholder').classList.remove('hidden')}finally{$('solveBtn').disabled=false}});
+$('resetBtn').onclick=()=>{ $('solverForm').reset();$('results').classList.add('hidden');$('placeholder').classList.remove('hidden');$('message').textContent='';last=null};
 $('copyBtn').onclick=async()=>{if(!last)return;try{await navigator.clipboard.writeText(textResult(last));$('copyBtn').textContent='Copied!';setTimeout(()=>$('copyBtn').textContent='Copy results',1500)}catch(e){$('message').textContent='Copy failed. Use Download instead.'}};
 $('downloadBtn').onclick=()=>{if(!last)return;const a=document.createElement('a'),url=URL.createObjectURL(new Blob([textResult(last)],{type:'text/plain'}));a.href=url;a.download='newton-raphson-solution.txt';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)};
-function render(d){$('results').classList.remove('hidden');$('root').textContent=fmt(d.root);$('residual').textContent=fmt(d.residual);$('count').textContent=d.steps.length;$('status').textContent=d.message;$('status').className=d.converged?'good':'bad';$('rows').replaceChildren();$('steps').replaceChildren();d.steps.forEach(s=>{const tr=document.createElement('tr');[s.iteration,s.x,s.fx,s.derivative,s.nextX,s.error,s.residual].forEach(v=>{const td=document.createElement('td');td.textContent=typeof v==='number'&&v!==s.iteration?fmt(v):String(v);tr.appendChild(td)});$('rows').appendChild(tr);const div=document.createElement('div');div.className='step';const title=document.createElement('strong');title.textContent=`Iteration ${s.iteration}`;div.append(title,document.createElement('br'),document.createTextNode(`xₙ = ${fmt(s.x)}; f(xₙ) = ${fmt(s.fx)}; f′(xₙ) ≈ ${fmt(s.derivative)}`),document.createElement('br'),document.createTextNode(`xₙ₊₁ = ${fmt(s.x)} − (${fmt(s.fx)}) / (${fmt(s.derivative)}) = ${fmt(s.nextX)}`),document.createElement('br'),document.createTextNode(`|Δx| = ${fmt(s.error)}; |f(xₙ₊₁)| = ${fmt(s.residual)}`));$('steps').appendChild(div)});drawGraph(d)}
-// Local graph parser: supports the same common functions as the Java exp4j backend.
-// It does not use eval or Function; unsupported expressions display a graph notice.
-function tokenize(s){const re=/\s*([0-9]+(?:\.[0-9]*)?(?:[eE][+-]?[0-9]+)?|\.[0-9]+(?:[eE][+-]?[0-9]+)?|[a-zA-Z_]+|[()+*/^,-])/gy,parts=[];let i=0;while(i<s.length){re.lastIndex=i;const m=re.exec(s);if(!m)throw Error('Unsupported graph expression');parts.push(m[1]);i=re.lastIndex}return parts}
-function graphFunction(source){const t=tokenize(source.replace(/π/g,'pi'));let i=0;const peek=()=>t[i],eat=v=>{if(peek()===v){i++;return true}return false};function primary(){if(eat('+'))return unary();if(eat('-')){const f=unary();return x=>-f(x)}if(eat('(')){const f=add();if(!eat(')'))throw Error('Missing )');return f}const v=t[i++];if(!v)throw Error('Missing value');if(/^(?:\d|\.)/.test(v)){const n=Number(v);return()=>n}if(v==='x')return x=>x;if(v==='pi')return()=>Math.PI;if(v==='e')return()=>Math.E;const funcs={sin:Math.sin,cos:Math.cos,tan:Math.tan,asin:Math.asin,acos:Math.acos,atan:Math.atan,sqrt:Math.sqrt,abs:Math.abs,log:Math.log,ln:Math.log,log10:Math.log10,exp:Math.exp,floor:Math.floor,ceil:Math.ceil};if(funcs[v]&&eat('(')){const f=add();if(!eat(')'))throw Error('Missing )');return x=>funcs[v](f(x))}throw Error('Unsupported graph function: '+v)}function power(){let f=primary();if(eat('^')){const a=f,b=unary();f=x=>Math.pow(a(x),b(x))}return f}function unary(){if(eat('+'))return unary();if(eat('-')){const f=unary();return x=>-f(x)}return power()}function mul(){let f=unary();while(peek()==='*'||peek()==='/'){const op=t[i++],a=f,b=unary();f=op==='*'?(x=>a(x)*b(x)):(x=>a(x)/b(x))}return f}function add(){let f=mul();while(peek()==='+'||peek()==='-'){const op=t[i++],a=f,b=mul();f=op==='+'?(x=>a(x)+b(x)):(x=>a(x)-b(x))}return f}const f=add();if(i!==t.length)throw Error('Unexpected token');return f}
-function drawGraph(d){const c=$('graph'),ctx=c.getContext('2d'),W=c.width,H=c.height;ctx.clearRect(0,0,W,H);$('graphNote').textContent='';let f;try{f=graphFunction(d.equation)}catch(e){$('graphNote').textContent='Graph unavailable for this expression. Numerical results remain valid.';return}const center=d.root,span=Math.max(2,Math.abs(center)*0.35),xmin=center-span,xmax=center+span,ys=[];for(let k=0;k<=W;k++){let y=f(xmin+(xmax-xmin)*k/W);if(Number.isFinite(y))ys.push(y)}if(!ys.length){$('graphNote').textContent='No finite graph values in this range.';return}ys.sort((a,b)=>a-b);let ymin=ys[Math.floor(ys.length*.05)],ymax=ys[Math.floor(ys.length*.95)];ymin=Math.min(ymin,0);ymax=Math.max(ymax,0);const margin=Math.max((ymax-ymin)*.15,1e-3);ymin-=margin;ymax+=margin;const px=x=>(x-xmin)/(xmax-xmin)*W,py=y=>H-(y-ymin)/(ymax-ymin)*H;ctx.strokeStyle='#36506e';ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(0,py(0));ctx.lineTo(W,py(0));if(xmin<=0&&xmax>=0){ctx.moveTo(px(0),0);ctx.lineTo(px(0),H)}ctx.stroke();ctx.strokeStyle='#67d6c4';ctx.lineWidth=2.5;ctx.beginPath();let started=false;for(let k=0;k<=W;k++){const x=xmin+(xmax-xmin)*k/W,y=f(x);if(!Number.isFinite(y)||Math.abs(y)>Math.max(Math.abs(ymin),Math.abs(ymax))*20){started=false;continue}if(!started){ctx.moveTo(k,py(y));started=true}else ctx.lineTo(k,py(y))}ctx.stroke();const ry=f(center);if(Number.isFinite(ry)){ctx.fillStyle='#ffca85';ctx.beginPath();ctx.arc(px(center),Math.max(0,Math.min(H,py(ry))),6,0,2*Math.PI);ctx.fill()}ctx.fillStyle='#b8cbe5';ctx.font='14px sans-serif';ctx.fillText(`x: ${fmt(xmin)} to ${fmt(xmax)}`,15,25);ctx.fillText(`root ≈ ${fmt(center)}`,15,H-18)}
+function render(d){$('results').classList.remove('hidden');$('placeholder').classList.add('hidden');$('root').textContent=fmt(d.root);$('residual').textContent=fmt(d.residual);$('count').textContent=d.steps.length;$('status').textContent=d.message;$('status').className=d.converged?'good':'bad';$('rows').replaceChildren();$('steps').replaceChildren();d.steps.forEach(s=>{const tr=document.createElement('tr');[s.iteration,s.x,s.fx,s.derivative,s.nextX,s.error,s.residual].forEach(v=>{const td=document.createElement('td');td.textContent=typeof v==='number'&&v!==s.iteration?fmt(v):String(v);tr.appendChild(td)});$('rows').appendChild(tr);const div=document.createElement('div');div.className='step';const title=document.createElement('strong');title.textContent=`Iteration ${s.iteration}`;div.append(title,document.createElement('br'),document.createTextNode(`xₙ = ${fmt(s.x)}; f(xₙ) = ${fmt(s.fx)}; f′(xₙ) ≈ ${fmt(s.derivative)}`),document.createElement('br'),document.createTextNode(`xₙ₊₁ = ${fmt(s.x)} − (${fmt(s.fx)}) / (${fmt(s.derivative)}) = ${fmt(s.nextX)}`),document.createElement('br'),document.createTextNode(`|Δx| = ${fmt(s.error)}; |f(xₙ₊₁)| = ${fmt(s.residual)}`));$('steps').appendChild(div)});drawGraph(d)}
+// The Java backend supplies plot points using the exact same exp4j expression
+// as the solver, so the graph cannot disagree with the calculation parser.
+function drawGraph(d) {
+  const c=$('graph'), ctx=c.getContext('2d'), W=c.width, H=c.height;
+  ctx.clearRect(0,0,W,H);
+  $('graphNote').textContent='';
+  const points=(d.graph||[]).filter(p=>p && Number.isFinite(p.x));
+  const valid=points.filter(p=>p.y!==null && Number.isFinite(p.y));
+  if(valid.length<2){$('graphNote').textContent='No finite function values near this approximation.';return;}
+  const xmin=points[0].x,xmax=points[points.length-1].x;
+  const sorted=valid.map(p=>p.y).sort((a,b)=>a-b);
+  let ymin=Math.min(0,sorted[Math.floor((sorted.length-1)*.03)]);
+  let ymax=Math.max(0,sorted[Math.floor((sorted.length-1)*.97)]);
+  const margin=Math.max((ymax-ymin)*.15,0.001);
+  ymin-=margin;ymax+=margin;
+  const left=58,right=18,top=24,bottom=42;
+  const px=x=>left+(x-xmin)/(xmax-xmin)*(W-left-right);
+  const py=y=>H-bottom-(y-ymin)/(ymax-ymin)*(H-top-bottom);
+  ctx.strokeStyle='#e5e9ef';ctx.lineWidth=1;ctx.font='12px sans-serif';ctx.fillStyle='#667386';
+  for(let i=0;i<=4;i++){
+    const y=ymin+(ymax-ymin)*i/4,yy=py(y);
+    ctx.beginPath();ctx.moveTo(left,yy);ctx.lineTo(W-right,yy);ctx.stroke();
+    ctx.fillText(y.toFixed(2),5,yy+4);
+  }
+  if(xmin<=0&&xmax>=0){ctx.strokeStyle='#b2bac7';ctx.beginPath();ctx.moveTo(px(0),top);ctx.lineTo(px(0),H-bottom);ctx.stroke();}
+  if(ymin<=0&&ymax>=0){ctx.strokeStyle='#b2bac7';ctx.beginPath();ctx.moveTo(left,py(0));ctx.lineTo(W-right,py(0));ctx.stroke();}
+  for(let i=0;i<=4;i++){const x=xmin+(xmax-xmin)*i/4;ctx.fillText(x.toFixed(2),Math.min(W-55,Math.max(left,px(x)-17)),H-17);}
+  ctx.save();ctx.beginPath();ctx.rect(left,top,W-left-right,H-top-bottom);ctx.clip();
+  ctx.strokeStyle='#2e72d2';ctx.lineWidth=2.5;ctx.beginPath();let active=false;
+  for(const p of points){
+    if(p.y===null||!Number.isFinite(p.y)||p.y<ymin-5*(ymax-ymin)||p.y>ymax+5*(ymax-ymin)){active=false;continue;}
+    if(!active){ctx.moveTo(px(p.x),py(p.y));active=true;}else ctx.lineTo(px(p.x),py(p.y));
+  }
+  ctx.stroke();
+  if(Number.isFinite(d.root)&&Number.isFinite(d.residual)){
+    const nearest=valid.reduce((a,b)=>Math.abs(a.x-d.root)<Math.abs(b.x-d.root)?a:b);
+    const x=px(d.root),y=py(nearest.y);
+    ctx.fillStyle='#e36b35';ctx.beginPath();ctx.arc(x,y,6,0,2*Math.PI);ctx.fill();
+  }
+  ctx.restore();
+  $('graphNote').textContent=`Function graph near x = ${fmt(d.root)}. Orange marker shows the computed approximation.`;
+}
