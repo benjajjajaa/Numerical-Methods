@@ -3,12 +3,21 @@ const $ = id => document.getElementById(id);
 
 let last = null;
 let graphBounds = null;
-let graphData = [];
+let graphTimer = null;
+let graphRequestId = 0;
 let graphEventsAttached = false;
-let graphUpdating = false;
+let graphReady = false;
+let graphGeneration = 0;
+let graphController = null;
+
+// ========================================
+// NUMBER AND MATH FORMATTING
+// ========================================
 
 const fmt = n =>
-    Number.isFinite(n) ? Number(n).toFixed(3) : String(n);
+    typeof n === "number" && Number.isFinite(n)
+        ? n.toFixed(3)
+        : String(n);
 
 const approxFmt = n =>
     n === null || n === undefined || !Number.isFinite(n)
@@ -46,14 +55,14 @@ const numberTex = n =>
 const safeEq = eq =>
     String(eq).replace(/\\/g, "").replace(/[<>]/g, "");
 
-const mathRender = () => {
+function mathRender() {
     if (window.MathJax?.typesetPromise) {
         window.MathJax.typesetPromise([
             $("solutionOverview"),
             $("steps")
         ]).catch(console.error);
     }
-};
+}
 
 // ========================================
 // COPY AND DOWNLOAD RESULTS
@@ -64,21 +73,27 @@ function textResult(d) {
         "NEWTON-RAPHSON SOLUTION",
         `Equation: ${d.equation}`,
         `Approximate root: ${fmt(d.root)}`,
-        `Residual: ${fmt(d.residual)}`,
+        `Residual: ${smallNonzero(d.residual)}`,
         `Status: ${d.message}`,
         `Iterations: ${d.steps.length}`,
         "",
-        "Formula: x_next = x - f(x) / f'(x)",
-        "Approximate relative error:",
+        "Newton-Raphson Formula:",
+        "x_next = x - f(x) / f'(x)",
+        "",
+        "Approximate Relative Error:",
         "Ea = |(Present - Previous) / Present| * 100%",
         "",
         ...d.steps.map(s => [
             `Iteration ${s.iteration}`,
-            `x = ${fmt(s.x)}`,
+            `Given: x = ${fmt(s.x)}`,
             `f(x) = ${fmt(s.fx)}`,
             `f'(x) = ${fmt(s.derivative)}`,
-            `Next x = ${fmt(s.nextX)}`,
-            `Approximate error = ${approxFmt(s.approximateErrorPercent)}%`,
+            "",
+            "Substitution:",
+            `x_next = ${fmt(s.x)} - (${fmt(s.fx)}) / (${fmt(s.derivative)})`,
+            "",
+            `Answer: x_next = ${fmt(s.nextX)}`,
+            `Approximate Error = ${approxFmt(s.approximateErrorPercent)}%`,
             ""
         ].join("\n"))
     ].join("\n");
@@ -94,32 +109,18 @@ document.querySelectorAll(
     button.addEventListener("click", () => {
         const field = $("equation");
 
-        const start =
-            field.selectionStart ?? field.value.length;
-
-        const end =
-            field.selectionEnd ?? start;
-
+        const start = field.selectionStart ?? field.value.length;
+        const end = field.selectionEnd ?? start;
         const insertion = button.dataset.insert || "";
 
         if (button.dataset.backspace) {
             if (start === end && start > 0) {
-                field.setRangeText(
-                    "",
-                    start - 1,
-                    end,
-                    "end"
-                );
+                field.setRangeText("", start - 1, end, "end");
             } else {
                 field.setRangeText("", start, end, "end");
             }
         } else {
-            field.setRangeText(
-                insertion,
-                start,
-                end,
-                "end"
-            );
+            field.setRangeText(insertion, start, end, "end");
         }
 
         field.focus();
@@ -130,11 +131,21 @@ document.querySelectorAll(
 // SOLVE EQUATION
 // ========================================
 
-$("solverForm").addEventListener("submit", async e => {
-    e.preventDefault();
+$("solverForm").addEventListener("submit", async event => {
+    event.preventDefault();
 
     $("message").textContent = "";
     $("solveBtn").disabled = true;
+
+    const stoppingError = $("tolerance").value.trim();
+
+    if (!stoppingError || Number(stoppingError) <= 0 ||
+        !Number.isFinite(Number(stoppingError))) {
+        $("message").textContent =
+            "Enter a valid positive stopping error percentage.";
+        $("solveBtn").disabled = false;
+        return;
+    }
 
     try {
         const response = await fetch("/api/solve", {
@@ -145,19 +156,16 @@ $("solverForm").addEventListener("submit", async e => {
             body: JSON.stringify({
                 equation: $("equation").value,
                 initialGuess: Number($("guess").value),
-                stoppingErrorPercent:
-                    Number($("tolerance").value),
-                maxIterations:
-                    Number($("iterations").value)
+                stoppingErrorPercent: Number(stoppingError),
+                maxIterations: Number($("iterations").value)
             })
         });
 
         if (!response.ok) {
-            const err = await response.json();
-
-            throw Error(
-                err.detail ||
-                err.message ||
+            const error = await response.json();
+            throw new Error(
+                error.detail ||
+                error.message ||
                 "Unable to calculate. Check your inputs."
             );
         }
@@ -165,10 +173,13 @@ $("solverForm").addEventListener("submit", async e => {
         last = await response.json();
         render(last);
 
-    } catch (err) {
-        $("message").textContent = err.message;
+    } catch (error) {
+        $("message").textContent = error.message;
         $("results").classList.add("hidden");
         $("placeholder").classList.remove("hidden");
+
+        last = null;
+        invalidateGraph();
 
     } finally {
         $("solveBtn").disabled = false;
@@ -181,15 +192,12 @@ $("solverForm").addEventListener("submit", async e => {
 
 $("resetBtn").onclick = () => {
     $("solverForm").reset();
-
     $("results").classList.add("hidden");
     $("placeholder").classList.remove("hidden");
-
     $("message").textContent = "";
 
     last = null;
-    graphBounds = null;
-    graphData = [];
+    invalidateGraph();
 };
 
 // ========================================
@@ -200,9 +208,7 @@ $("copyBtn").onclick = async () => {
     if (!last) return;
 
     try {
-        await navigator.clipboard.writeText(
-            textResult(last)
-        );
+        await navigator.clipboard.writeText(textResult(last));
 
         $("copyBtn").textContent = "Copied!";
 
@@ -210,7 +216,7 @@ $("copyBtn").onclick = async () => {
             $("copyBtn").textContent = "Copy results";
         }, 1500);
 
-    } catch (e) {
+    } catch (error) {
         $("message").textContent =
             "Copy failed. Use Download instead.";
     }
@@ -223,25 +229,22 @@ $("copyBtn").onclick = async () => {
 $("downloadBtn").onclick = () => {
     if (!last) return;
 
-    const a = document.createElement("a");
+    const blob = new Blob([textResult(last)], {
+        type: "text/plain"
+    });
 
-    const url = URL.createObjectURL(
-        new Blob([textResult(last)], {
-            type: "text/plain"
-        })
-    );
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
 
-    a.href = url;
-    a.download = "newton-raphson-solution.txt";
-    a.click();
+    link.href = url;
+    link.download = "newton-raphson-solution.txt";
+    link.click();
 
-    setTimeout(() => {
-        URL.revokeObjectURL(url);
-    }, 1000);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
 };
 
 // ========================================
-// DISPLAY RESULTS
+// DISPLAY CALCULATION RESULTS
 // ========================================
 
 function render(d) {
@@ -249,58 +252,48 @@ function render(d) {
     $("placeholder").classList.add("hidden");
 
     $("root").textContent = fmt(d.root);
-
-    $("residual").textContent =
-        smallNonzero(d.residual);
-
+    $("residual").textContent = smallNonzero(d.residual);
     $("count").textContent = d.steps.length;
-
     $("status").textContent = d.message;
-
-    $("status").className =
-        d.converged ? "good" : "bad";
+    $("status").className = d.converged ? "good" : "bad";
 
     $("rows").replaceChildren();
     $("steps").replaceChildren();
 
     const eq = safeEq(d.equation);
+    const guess = Number($("guess").value);
+    const stop = $("tolerance").value;
 
     $("solutionOverview").innerHTML =
         "<h3>Given and Formulas</h3>" +
 
-        tex(`f(x)=\\text{${eq}}`) +
-
-        tex(`x_0=${fmt(Number($("guess").value))}`) +
-
-        tex(
-            `\\varepsilon_{\\mathrm{stop}}=` +
-            `${escapeHtml($("tolerance").value)}\\%`
+        mathSection(
+            "Given",
+            tex(`\\text{Function: }${escapeHtml(eq)}`) +
+            tex(`x_0=${fmt(guess)}`) +
+            tex(`\\varepsilon_{\\mathrm{stop}}=${escapeHtml(stop)}\\%`)
         ) +
 
         mathSection(
             "Newton-Raphson Formula",
-            tex(
-                "x_{n+1}=x_n-" +
-                "\\frac{f(x_n)}{f'(x_n)}"
-            )
+            tex("x_{n+1}=x_n-\\frac{f(x_n)}{f'(x_n)}")
         ) +
 
         mathSection(
             "Approximate Relative Error",
             tex(
                 "\\varepsilon_a=" +
-                "\\left|" +
-                "\\frac{x_{n+1}-x_n}{x_{n+1}}" +
-                "\\right|\\times100\\%"
+                "\\left|\\frac{x_{n+1}-x_n}{x_{n+1}}\\right|" +
+                "\\times100\\%"
             )
         ) +
 
         `<p class="small-note">
-            Stop when the unrounded approximate
-            relative error is less than or equal
-            to the percentage entered by the user.
-            Calculations use full precision.
-            Displayed values use three decimal places.
+            Stop when the unrounded approximate relative error
+            is less than or equal to the percentage entered.
+            Derivatives are estimated using central differences.
+            All calculations use full precision, while results
+            are displayed to three decimal places.
         </p>`;
 
     d.steps.forEach(s => {
@@ -316,58 +309,43 @@ function render(d) {
             approxFmt(s.approximateErrorPercent)
         ].forEach(value => {
             const td = document.createElement("td");
-
             td.textContent = value;
             tr.appendChild(td);
         });
 
         $("rows").appendChild(tr);
 
-        // Approximate error
-        const percent =
-            Number.isFinite(s.approximateErrorPercent)
-                ? tex(
-                    `\\varepsilon_a=` +
-                    `${numberTex(s.approximateErrorPercent)}\\%`
-                )
-                : `<p class="small-note">
-                    Relative error is undefined
-                    because the new approximation is zero.
-                  </p>`;
+        // Approximate relative error
+        const percent = Number.isFinite(s.approximateErrorPercent)
+            ? tex(
+                `\\varepsilon_a=${numberTex(s.approximateErrorPercent)}\\%`
+            )
+            : `<p class="small-note">
+                Relative error is undefined because
+                the new approximation is zero.
+               </p>`;
 
-        const percentSub =
-            Math.abs(s.nextX) > 0
-                ? tex(
-                    `\\varepsilon_a=` +
-                    `\\left|\\frac{` +
-                    `${fmt(s.nextX)}-(${fmt(s.x)})` +
-                    `}{${fmt(s.nextX)}}\\right|` +
-                    `\\times100\\%`
-                )
-                : "";
+        const percentSub = s.nextX !== 0
+            ? tex(
+                `\\varepsilon_a=` +
+                `\\left|\\frac{${fmt(s.nextX)}-(${fmt(s.x)})}` +
+                `{${fmt(s.nextX)}}\\right|\\times100\\%`
+            )
+            : "";
 
         const block = document.createElement("article");
-
         block.className = "step";
 
         block.innerHTML =
             `<div class="step-heading">
                 Iteration ${s.iteration}
             </div>
-
             <div class="step-content">` +
 
             mathSection(
                 "1. Given",
-
-                tex(
-                    `x_{${s.iteration - 1}}=${fmt(s.x)}`
-                ) +
-
-                tex(
-                    `f(x_{${s.iteration - 1}})=${fmt(s.fx)}`
-                ) +
-
+                tex(`x_{${s.iteration - 1}}=${fmt(s.x)}`) +
+                tex(`f(x_{${s.iteration - 1}})=${fmt(s.fx)}`) +
                 tex(
                     `f'(x_{${s.iteration - 1}})` +
                     `\\approx${fmt(s.derivative)}`
@@ -376,52 +354,35 @@ function render(d) {
 
             mathSection(
                 "2. Formula",
-
-                tex(
-                    "x_{n+1}=x_n-" +
-                    "\\frac{f(x_n)}{f'(x_n)}"
-                ) +
-
+                tex("x_{n+1}=x_n-\\frac{f(x_n)}{f'(x_n)}") +
                 tex(
                     "\\varepsilon_a=" +
-                    "\\left|" +
-                    "\\frac{x_{n+1}-x_n}{x_{n+1}}" +
-                    "\\right|\\times100\\%"
+                    "\\left|\\frac{x_{n+1}-x_n}{x_{n+1}}\\right|" +
+                    "\\times100\\%"
                 )
             ) +
 
             mathSection(
                 "3. Substitution",
-
                 tex(
-                    `x_{${s.iteration}}=` +
-                    `${fmt(s.x)}-` +
-                    `\\frac{${fmt(s.fx)}}` +
-                    `{${fmt(s.derivative)}}`
+                    `x_{${s.iteration}}=${fmt(s.x)}` +
+                    `-\\frac{${fmt(s.fx)}}{${fmt(s.derivative)}}`
                 )
             ) +
 
             mathSection(
                 "4. Solution",
-
-                tex(
-                    `x_{${s.iteration}}=${fmt(s.nextX)}`
-                ) +
-
+                tex(`x_{${s.iteration}}=${fmt(s.nextX)}`) +
                 percentSub +
                 percent
             ) +
 
             mathSection(
                 "5. Final Answer",
-
                 `<div class="work-answer">` +
-
                 tex(
-                    `\\boxed{x_{${s.iteration}}=` +
-                    `${fmt(s.nextX)}}`
+                    `\\boxed{x_{${s.iteration}}=${fmt(s.nextX)}}`
                 ) +
-
                 (
                     Number.isFinite(s.approximateErrorPercent)
                         ? tex(
@@ -430,7 +391,6 @@ function render(d) {
                         )
                         : "<p>Relative error undefined</p>"
                 ) +
-
                 "</div>"
             ) +
 
@@ -444,23 +404,99 @@ function render(d) {
 }
 
 // ========================================
-// INTERACTIVE GRAPH
+// GRAPH UTILITIES
+// ========================================
+
+function invalidateGraph() {
+    graphGeneration++;
+    graphRequestId++;
+    graphReady = false;
+    graphBounds = null;
+
+    clearTimeout(graphTimer);
+
+    if (graphController) {
+        graphController.abort();
+        graphController = null;
+    }
+}
+
+function finitePoints(points) {
+    return (points || [])
+        .filter(p => p && Number.isFinite(p.x))
+        .sort((a, b) => a.x - b.x);
+}
+
+// Calculate y-axis bounds for the visible curve.
+// Uses finite values and includes the zero line.
+function getYRange(points, xMin, xMax) {
+    const visible = points.filter(p =>
+        p &&
+        Number.isFinite(p.x) &&
+        Number.isFinite(p.y) &&
+        p.x >= xMin &&
+        p.x <= xMax
+    );
+
+    if (visible.length === 0) {
+        return [-5, 5];
+    }
+
+    const values = visible.map(p => p.y);
+
+    // Reduce the effect of extreme values near
+    // discontinuities when determining the initial view.
+    const sorted = [...values].sort((a, b) => a - b);
+
+    const lowIndex = Math.floor((sorted.length - 1) * 0.01);
+    const highIndex = Math.ceil((sorted.length - 1) * 0.99);
+
+    let min = Math.min(0, sorted[lowIndex]);
+    let max = Math.max(0, sorted[highIndex]);
+
+    const padding = Math.max((max - min) * 0.12, 0.1);
+
+    return [min - padding, max + padding];
+}
+
+// ========================================
+// GRAPH API REQUEST
+// ========================================
+
+async function requestGraph(xMin, xMax, signal) {
+    if (!last) {
+        throw new Error("No equation has been calculated.");
+    }
+
+    const response = await fetch("/api/graph", {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json"
+        },
+        signal,
+        body: JSON.stringify({
+            equation: last.equation,
+            xMin,
+            xMax,
+            points: 800
+        })
+    });
+
+    if (!response.ok) {
+        throw new Error(
+            "Unable to generate graph points. Check the Java backend."
+        );
+    }
+
+    return await response.json();
+}
+
+// ========================================
+// INITIAL INTERACTIVE GRAPH
 // ========================================
 
 function drawGraph(d) {
-    const points = (d.graph || [])
-        .filter(p =>
-            p &&
-            Number.isFinite(p.x) &&
-            Number.isFinite(p.y)
-        )
-        .sort((a, b) => a.x - b.x);
-
-    if (points.length < 2) {
-        $("graphNote").textContent =
-            "No graph data available.";
-        return;
-    }
+    invalidateGraph();
 
     if (!window.Plotly) {
         $("graphNote").textContent =
@@ -468,215 +504,248 @@ function drawGraph(d) {
         return;
     }
 
-    graphData = points;
+    const points = finitePoints(d.graph);
 
-    const root = d.root;
-
-    const xValues = points.map(p => p.x);
-    const yValues = points.map(p => p.y);
-
-    const xMin = Math.min(...xValues);
-    const xMax = Math.max(...xValues);
-
-    // Focus the graph near the calculated root.
-    const availableWidth = xMax - xMin;
-
-    const halfWidth = Math.max(
-        availableWidth * 0.35,
-        0.5
-    );
-
-    let left = Math.max(
-        xMin,
-        root - halfWidth
-    );
-
-    let right = Math.min(
-        xMax,
-        root + halfWidth
-    );
-
-    if (right <= left) {
-        left = xMin;
-        right = xMax;
+    if (points.length < 2) {
+        $("graphNote").textContent =
+            "No graph data available.";
+        return;
     }
 
-    const visible = points.filter(p =>
-        p.x >= left && p.x <= right
-    );
+    const generation = graphGeneration;
+    const graph = $("graph");
 
-    const visibleY = visible.map(p => p.y);
+    const xMin = points[0].x;
+    const xMax = points[points.length - 1].x;
 
-    let yMin = Math.min(0, ...visibleY);
-    let yMax = Math.max(0, ...visibleY);
-
-    const yPadding = Math.max(
-        (yMax - yMin) * 0.15,
-        0.1
-    );
-
-    yMin -= yPadding;
-    yMax += yPadding;
+    const yRange = getYRange(points, xMin, xMax);
 
     graphBounds = {
-        x: [left, right],
-        y: [yMin, yMax]
+        x: [xMin, xMax],
+        y: yRange
     };
 
-    const trace = {
-        x: xValues,
-        y: yValues,
+    const curve = {
+        x: points.map(p => p.x),
+        y: points.map(p => p.y),
         type: "scatter",
         mode: "lines",
         name: "f(x)",
-
+        connectgaps: false,
         line: {
             color: "#2e72d2",
             width: 3
         },
-
-        connectgaps: false
+        hovertemplate:
+            "x: %{x:.3f}<br>f(x): %{y:.3f}<extra></extra>"
     };
 
-    const marker = {
-        x: [root],
+    const rootMarker = {
+        x: [d.root],
         y: [0],
-
         type: "scatter",
         mode: "markers",
-
         name: "Approximate root",
-
         marker: {
             color: "#e36b35",
             size: 12
-        }
+        },
+        hovertemplate:
+            "Approximate root: %{x:.3f}<extra></extra>"
     };
 
     const layout = {
         autosize: true,
         height: 420,
-
         margin: {
             l: 65,
             r: 25,
-            t: 25,
+            t: 30,
             b: 60
         },
-
         xaxis: {
             title: "x",
-            range: graphBounds.x,
+            range: [...graphBounds.x],
             showgrid: true,
-            zeroline: true,
             gridcolor: "#e8edf4",
+            zeroline: true,
             zerolinecolor: "#777"
         },
-
         yaxis: {
             title: "f(x)",
-            range: graphBounds.y,
+            range: [...graphBounds.y],
             showgrid: true,
-            zeroline: true,
             gridcolor: "#e8edf4",
+            zeroline: true,
             zerolinecolor: "#777"
         },
-
         dragmode: "pan",
         hovermode: "closest",
         showlegend: false,
-
         paper_bgcolor: "#ffffff",
-        plot_bgcolor: "#ffffff"
+        plot_bgcolor: "#ffffff",
+        uirevision: "newton-graph"
     };
 
     const config = {
         responsive: true,
         displaylogo: false,
         scrollZoom: true,
-
         modeBarButtonsToRemove: [
             "lasso2d",
             "select2d"
         ]
     };
 
-    const graph = $("graph");
-
     Plotly.react(
         graph,
-        [trace, marker],
+        [curve, rootMarker],
         layout,
         config
     ).then(() => {
+        if (generation !== graphGeneration) return;
+
+        graphReady = true;
         attachGraphEvents();
+    }).catch(error => {
+        if (generation === graphGeneration) {
+            $("graphNote").textContent =
+                "Unable to display graph: " + error.message;
+        }
     });
 
     $("graphNote").textContent =
-        "Drag to pan, scroll to zoom, or reset the graph.";
+        "Drag to pan, scroll to zoom, or use Reset view.";
 }
 
 // ========================================
-// AUTO ADJUST Y-AXIS
+// DYNAMIC GRAPH RANGE
 // ========================================
 
-function adjustYAxis() {
-    if (!window.Plotly || graphUpdating) return;
+async function updateGraphRange() {
+    if (!last || !graphReady || !window.Plotly) {
+        return;
+    }
 
     const graph = $("graph");
+    const range = graph.layout?.xaxis?.range;
 
-    if (!graph?.layout?.xaxis?.range) return;
+    if (!range || range.length !== 2) return;
 
-    const [left, right] = graph.layout.xaxis.range;
+    const xMin = Number(range[0]);
+    const xMax = Number(range[1]);
 
-    const visible = graphData.filter(p =>
-        p.x >= left && p.x <= right
-    );
+    if (
+        !Number.isFinite(xMin) ||
+        !Number.isFinite(xMax) ||
+        xMin >= xMax
+    ) {
+        return;
+    }
 
-    if (visible.length < 2) return;
+    // Prevent unsupported ranges.
+    const width = xMax - xMin;
+    if (width > 600000 || width < 1e-12) {
+        $("graphNote").textContent =
+            "Zoom to a smaller graph range to display the function.";
+        return;
+    }
 
-    const yValues = visible.map(p => p.y);
+    const generation = graphGeneration;
+    const requestId = ++graphRequestId;
 
-    let yMin = Math.min(0, ...yValues);
-    let yMax = Math.max(0, ...yValues);
+    if (graphController) {
+        graphController.abort();
+    }
 
-    const padding = Math.max(
-        (yMax - yMin) * 0.15,
-        0.1
-    );
+    graphController = new AbortController();
 
-    yMin -= padding;
-    yMax += padding;
+    try {
+        // Add points outside the visible range
+        // so small movements do not expose empty edges.
+        const extra = width * 0.20;
 
-    graphUpdating = true;
+        const points = finitePoints(
+            await requestGraph(
+                xMin - extra,
+                xMax + extra,
+                graphController.signal
+            )
+        );
 
-    Plotly.relayout(graph, {
-        "yaxis.range": [yMin, yMax]
-    }).finally(() => {
-        graphUpdating = false;
-    });
+        if (
+            generation !== graphGeneration ||
+            requestId !== graphRequestId
+        ) {
+            return;
+        }
+
+        const yRange = getYRange(points, xMin, xMax);
+
+        // Replace only the function trace.
+        // Preserve the root marker and current x-axis view.
+        await Plotly.restyle(graph, {
+            x: [points.map(p => p.x)],
+            y: [points.map(p => p.y)]
+        }, [0]);
+
+        if (
+            generation !== graphGeneration ||
+            requestId !== graphRequestId
+        ) {
+            return;
+        }
+
+        await Plotly.relayout(graph, {
+            "yaxis.range": yRange
+        });
+
+        $("graphNote").textContent =
+            "Graph updated. Drag to pan or scroll to zoom.";
+
+    } catch (error) {
+        if (error.name === "AbortError") return;
+
+        if (
+            generation === graphGeneration &&
+            requestId === graphRequestId
+        ) {
+            $("graphNote").textContent =
+                "Could not extend the graph. " +
+                "Check that /api/graph is available.";
+        }
+    }
 }
 
 // ========================================
-// GRAPH EVENTS
+// GRAPH NAVIGATION EVENTS
 // ========================================
+
+function scheduleGraphUpdate() {
+    clearTimeout(graphTimer);
+
+    graphTimer = setTimeout(() => {
+        updateGraphRange();
+    }, 180);
+}
 
 function attachGraphEvents() {
     const graph = $("graph");
 
     if (graphEventsAttached) return;
-
     if (typeof graph.on !== "function") return;
 
     graph.on("plotly_relayout", event => {
-        if (graphUpdating) return;
+        if (!graphReady) return;
 
-        if (
+        const xChanged =
             event["xaxis.range[0]"] !== undefined ||
             event["xaxis.range[1]"] !== undefined ||
-            event["xaxis.range"] !== undefined
-        ) {
-            adjustYAxis();
+            event["xaxis.range"] !== undefined ||
+            event["xaxis.autorange"] === true;
+
+        if (xChanged) {
+            scheduleGraphUpdate();
         }
     });
 
@@ -684,54 +753,48 @@ function attachGraphEvents() {
 }
 
 // ========================================
-// ZOOM CONTROLS
+// ZOOM IN / ZOOM OUT
 // ========================================
 
 function scaleGraph(factor) {
-    if (!graphBounds || !window.Plotly) return;
+    if (!graphBounds || !window.Plotly || !graphReady) {
+        return;
+    }
 
     const graph = $("graph");
-    const layout = graph.layout;
+    const range = graph.layout?.xaxis?.range;
 
-    if (!layout?.xaxis?.range) return;
+    if (!range || range.length !== 2) return;
 
-    const scaled = range => {
-        const middle =
-            (range[0] + range[1]) / 2;
-
-        const half =
-            (range[1] - range[0]) * factor / 2;
-
-        return [
-            middle - half,
-            middle + half
-        ];
-    };
+    const middle = (range[0] + range[1]) / 2;
+    const halfWidth = (range[1] - range[0]) * factor / 2;
 
     Plotly.relayout(graph, {
-        "xaxis.range": scaled(layout.xaxis.range)
-    }).then(adjustYAxis);
+        "xaxis.range": [
+            middle - halfWidth,
+            middle + halfWidth
+        ]
+    });
 }
 
-$("zoomIn").onclick = () => {
-    scaleGraph(0.7);
-};
-
-$("zoomOut").onclick = () => {
-    scaleGraph(1.4);
-};
+$("zoomIn").onclick = () => scaleGraph(0.7);
+$("zoomOut").onclick = () => scaleGraph(1.4);
 
 // ========================================
 // RESET GRAPH VIEW
 // ========================================
 
 $("resetView").onclick = () => {
-    if (!graphBounds || !window.Plotly) return;
+    if (!graphBounds || !window.Plotly || !graphReady) {
+        return;
+    }
 
     Plotly.relayout($("graph"), {
         "xaxis.range": [...graphBounds.x],
         "yaxis.range": [...graphBounds.y]
     });
+
+    scheduleGraphUpdate();
 };
 
 // ========================================
@@ -740,21 +803,22 @@ $("resetView").onclick = () => {
 
 $("fullGraph").onclick = () => {
     const graph = $("graph");
+    const section = graph.closest(".result-section");
 
-    const section =
-        graph.closest(".result-section");
+    if (!section) return;
 
     section.classList.toggle("graph-expanded");
 
     const expanded =
         section.classList.contains("graph-expanded");
 
-    $("fullGraph").textContent =
-        expanded
-            ? "Minimize graph"
-            : "Expand graph";
+    $("fullGraph").textContent = expanded
+        ? "Minimize graph"
+        : "Expand graph";
 
     if (window.Plotly) {
-        Plotly.Plots.resize(graph);
+        requestAnimationFrame(() => {
+            Plotly.Plots.resize(graph);
+        });
     }
 };
