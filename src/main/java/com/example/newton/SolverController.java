@@ -38,9 +38,11 @@ public class SolverController {
   private Expression parse(String raw) {
     if(raw == null || raw.isBlank() || raw.length()>250) throw new IllegalArgumentException("Enter an equation (maximum 250 characters).");
     String eq=raw.trim().replace('×','*').replace('−','-').replace("π","pi");
+    eq = eq.replaceAll("\\blog\\s*\\(", "log10(");
+    eq = eq.replaceAll("\\bln\\s*\\(", "log(");
     if(eq.contains("=")) throw new IllegalArgumentException("Enter f(x) only, without '= 0'.");
     try { return new ExpressionBuilder(eq).variable("x").build(); }
-    catch(Exception ex) { throw new IllegalArgumentException("Invalid equation. Use x^3-x-2, sin(x), cos(x), log(x), or exp(x)."); }
+    catch(Exception ex) { throw new IllegalArgumentException("Invalid equation. Use x^3-x-2, sin(x), cos(x), ln(x), log(x), sqrt(x), exp(x), or e^x."); }
   }
   private double value(Expression e,double x) {
     double v=e.setVariable("x",x).evaluate();
